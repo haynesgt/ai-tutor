@@ -1,7 +1,7 @@
 'use client';
 
 import Image from "next/image";
-import { useState, useEffect, useReducer, use } from "react";
+import {  useCallback, useEffect, useReducer, useRef } from "react";
 
 const flashcards = [
   { front: "Amicus", back: "Friend" },
@@ -31,46 +31,68 @@ interface FlashcardsState {
   cardsRemaining: { front: string; back: string }[];
   showBack: boolean;
   isLoading: boolean;
+  isLoaded: boolean;
 }
+type Card = {
+  front: string;
+  back: string;
+};
 
 type FlashcardsAction =
-  | { type: 'LOAD_CARDS'; payload: { front: string; back: string }[] }
+  | { type: 'LOAD_CARDS'; payload: Card[] }
+  | { type: 'LOAD_MORE_CARDS'; payload: Card[] }
   | { type: 'SHOW_BACK' }
   | { type: 'HIDE_BACK' }
   | { type: 'SUBMIT_SCORE'; payload: number }
-  | { type: 'NEXT_CARD'; payload: number };
+  | { type: 'LOAD_STATE'; payload: FlashcardsState }
+  | { type: 'RESET_STATE' };
 
 const initialState: FlashcardsState = {
   cardsSeen: [],
   cardsRemaining: [],
   showBack : false,
   isLoading: false,
+  isLoaded: false,
 }
 
 // reducer for flashcards state
 function reducer(state: FlashcardsState, action: FlashcardsAction): FlashcardsState {
   switch (action.type) {
+    case 'LOAD_STATE':
+      return { ...state, ...action.payload, isLoaded: true };
     case 'LOAD_CARDS':
-      return { ...state, cardsSeen: [], cardsRemaining: action.payload, showBack: false };
+      return { ...state, cardsSeen: [], cardsRemaining: action.payload, showBack: false, isLoaded: true };
+    case 'LOAD_MORE_CARDS':
+      return { ...state, cardsRemaining: [...state.cardsRemaining, ...action.payload] };
     case 'SHOW_BACK':
       return { ...state, showBack: true };
     case 'HIDE_BACK':
       return { ...state, showBack: false };
     case 'SUBMIT_SCORE':
+      if (state.cardsRemaining.length === 0) return state;
+
+      const updatedCardsSeen = [...state.cardsSeen, { ...state.cardsRemaining[0], score: action.payload }];
+      let updatedCardsRemaining = state.cardsRemaining.slice(1);
+
+      while (updatedCardsSeen.length > 10) {
+        const removedCard = updatedCardsSeen.shift();
+        if (removedCard) {
+          if (removedCard.score === 0) {
+        updatedCardsRemaining = [removedCard, ...updatedCardsRemaining];
+          } else if (removedCard.score === 0.5) {
+        updatedCardsRemaining = [...updatedCardsRemaining, removedCard];
+          }
+        }
+      }
+
       return {
         ...state,
-        cardsSeen: [...state.cardsSeen, { ...state.cardsRemaining[0], score: action.payload }],
-        cardsRemaining: state.cardsRemaining.slice(1),
+        cardsSeen: updatedCardsSeen,
+        cardsRemaining: updatedCardsRemaining,
         showBack: false,
       };
-    case 'NEXT_CARD':
-      const [nextCard, ...remainingCards] = state.cardsRemaining;
-      return {
-        ...state,
-        cardsSeen: [...state.cardsSeen, { ...nextCard, score: action.payload }],
-        cardsRemaining: remainingCards,
-        showBack: false,
-      };
+    case 'RESET_STATE':
+      return initialState;
     default:
       return state;
   }
@@ -87,7 +109,49 @@ function Main() {
   // when all cards are done, show the results. send the results to the server to get the next set
   // user presses space to start the next set
   const [state, dispatch] = useReducer<FlashcardsState, [FlashcardsAction]>(reducer, initialState);
+  const isFetchingMoreRef = useRef(false);
 
+  const loadMoreCardsIfNeeded = useCallback(() => {
+    if (isFetchingMoreRef.current) return;
+    if (state.cardsRemaining.length > 5) return;
+    isFetchingMoreRef.current = true;
+    fetch('/api/flashcards', {
+      method: 'POST',
+      headers: {
+      'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+      knownWords: [
+        ...state.cardsSeen.map((card) => card.front),
+        ...state.cardsRemaining.map((card) => card.front),
+      ],
+      }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+      dispatch({ type: 'LOAD_MORE_CARDS', payload: data });
+      })
+      .catch((error) => {
+      console.error('Error loading cards:', error);
+      })
+      .finally(() => {
+      isFetchingMoreRef.current = false;
+      });
+  }, [state.cardsRemaining.length]);
+
+  useEffect(() => {
+    const savedState = localStorage.getItem('flashcardsState');
+    if (savedState) {
+      dispatch({ type: 'LOAD_STATE', payload: JSON.parse(savedState) });
+    } else {
+      dispatch({ type: 'LOAD_CARDS', payload: flashcards });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!state.isLoaded) return;
+    localStorage.setItem('flashcardsState', JSON.stringify(state));
+  }, [state]);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === ' ' || event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
@@ -106,19 +170,15 @@ function Main() {
         event.preventDefault();
         dispatch({ type: 'SUBMIT_SCORE', payload: 1 });
       }
+      loadMoreCardsIfNeeded();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }
-  , [state.showBack]);
-  useEffect(() => {
-    if (state.cardsRemaining.length === 0) {
-      dispatch({ type: 'LOAD_CARDS', payload: flashcards });
-    }
-  }
-  , [state.cardsRemaining.length]);
+  , [state.showBack, loadMoreCardsIfNeeded]);
+
   return (
     <div className="flex flex-col gap-[32px]">
       <div className="flex flex-col gap-[32px]">
@@ -132,19 +192,19 @@ function Main() {
                   <h3 className="text-xl font-bold">{state.cardsRemaining[0].back}</h3>
                   <div className="flex gap-[32px]">
                     <button 
-                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 1 })} 
+                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 0 })} 
                       className="bg-red-500 text-white px-4 py-2 rounded"
                     >
                       Soon
                     </button>
                     <button 
-                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 2 })} 
+                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 0.5 })} 
                       className="bg-yellow-500 text-white px-4 py-2 rounded"
                     >
                       Later
                     </button>
                     <button 
-                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 3 })} 
+                      onClick={() => dispatch({ type: 'SUBMIT_SCORE', payload: 1 })} 
                       className="bg-green-500 text-white px-4 py-2 rounded"
                     >
                       Good
@@ -166,6 +226,22 @@ function Main() {
               }
             </div>
           </div>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-[32px] min-w-[600px] min-h-[400px]">
+          <div className="flex flex-col gap-[32px]">
+          <h2 className="text-2xl font-bold">All done!</h2>
+          <div className="flex gap-[32px]">
+            <button
+              onClick={() =>  dispatch({ type: 'LOAD_CARDS', payload: flashcards })}
+              className="bg-gray-500 text-white px-4 py-2 rounded"
+            >
+              Next Set
+            </button>
+          </div>
+          </div>
+          </div>
+        )}
             <div className="flex flex-col gap-[16px]">
               <h3 className="text-xl font-bold">Flashcards:</h3>
               <table className="table-auto border-collapse border border-gray-400 w-full">
@@ -191,10 +267,6 @@ function Main() {
               </tbody>
               </table>
             </div>
-          </div>
-        ) : (
-          <h2 className="text-2xl font-bold">All done!</h2>
-        )}
       </div>
     </div>
   );
